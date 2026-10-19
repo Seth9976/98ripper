@@ -1,0 +1,90 @@
+# -----------------------------------------------------------------------------
+# 工作流：自动解压多种常见格式压缩包
+# - 为每个压缩包创建独立的同名文件夹再解压
+# - 解压失败的文件跳过继续，不中断整体流程
+# - 并发锁 + push 前 rebase 防止竞态
+# -----------------------------------------------------------------------------
+
+name: 自动解压多种常见格式压缩包
+on:
+  push:
+    branches: [ main, master, GM82 ]
+    paths:
+      - '**.zip'
+      - '**.7z'
+      - '**.rar'
+      - '**.tar'
+      - '**.tar.gz'
+      - '**.tgz'
+      - '**.tar.bz2'
+      - '**.tar.xz'
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract_all_archives:
+    runs-on: ubuntu-22.04
+    if: github.actor != 'github-actions[bot]'
+    concurrency:
+      group: extract-archives-{{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装解压依赖
+        run: sudo apt-get update -y && sudo apt-get install -y p7zip-full unrar
+
+      - name: 查找、解压、暂存并删除压缩包
+        run: |
+          mapfile -t ARCHIVES < <(find . -type f -not -path './.git/*' | grep -iE '\.(zip|7z|rar|tar\.gz|tar\.bz2|tar\.xz|tar|tgz)$')
+          if [ "${#ARCHIVES[@]}" -eq 0 ]; then echo "未找到压缩文件。"; exit 0; fi
+          echo "找到 ${#ARCHIVES[@]} 个压缩文件。"
+          FAIL_COUNT=0
+          for FILE in "${ARCHIVES[@]}"; do
+            TARGET_DIR="$(dirname "$FILE")"
+            FILENAME="$(basename "$FILE")"
+            BASENAME="$(echo "$FILENAME" | sed -E 's/\.(tar\.(gz|bz2|xz)|tgz|zip|7z|rar)$//i')"
+            DEST_DIR="$TARGET_DIR/$BASENAME"
+            mkdir -p "$DEST_DIR"
+            echo "正在处理: $FILE -> $DEST_DIR"
+            LOWER="$(echo "$FILENAME" | tr '[:upper:]' '[:lower:]')"
+            OK=true
+            case "$LOWER" in
+              *.zip) unzip -o "$FILE" -d "$DEST_DIR" || OK=false ;;
+              *.7z) 7z x "$FILE" -o"$DEST_DIR" -y || OK=false ;;
+              *.rar) unrar x -o+ "$FILE" "$DEST_DIR/" || OK=false ;;
+              *.tar.gz|*.tgz) tar -xzf "$FILE" -C "$DEST_DIR" || OK=false ;;
+              *.tar.bz2) tar -xjf "$FILE" -C "$DEST_DIR" || OK=false ;;
+              *.tar.xz) tar -xJf "$FILE" -C "$DEST_DIR" || OK=false ;;
+              *.tar) tar -xf "$FILE" -C "$DEST_DIR" || OK=false ;;
+              *) echo "  -> 未知格式，跳过"; OK=false ;;
+            esac
+            if $OK; then
+              echo "  -> 解压成功。"
+              git add --force "$DEST_DIR"
+              rm "$FILE"
+              git add "$FILE"
+            else
+              echo "  -> 解压失败，跳过。"
+              rmdir "$DEST_DIR" 2>/dev/null || true
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+            fi
+          done
+          echo "完成。成功: $((${#ARCHIVES[@]} - FAIL_COUNT)), 失败: $FAIL_COUNT"
+
+      - name: 提交变动
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --staged --quiet; then
+            git commit -m "Chore: 自动解压并删除多种格式压缩包"
+            git pull --rebase origin main
+            git push
+          else
+            echo "没有文件变动需要提交。"
+          fi
