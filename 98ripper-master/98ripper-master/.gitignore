@@ -1,0 +1,11 @@
+*
+!*.*
+!*LICENSE*
+!*/
+
+*.exe
+*.dll
+*.log
+*.a
+*.o
+*.bak
